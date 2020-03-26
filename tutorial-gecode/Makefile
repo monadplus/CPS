@@ -3,14 +3,26 @@ DIR  = /usr/local
 LIBS = -lgecodedriver    -lgecodesearch  \
        -lgecodeminimodel -lgecodeint     \
        -lgecodekernel    -lgecodesupport
-PROG_NAME = ite
+TEST_EVALUATION = test-evaluation
+SEND_MORE_MONEY = send-more-money-handling-exceptions
+SEND_MOST_MONEY = send-most-money
 
-$(PROG_NAME): $(PROG_NAME).cpp
-	#$(CXX) -I$(DIR)/include -c $(PROG_NAME).cpp # Header files
-	#$(CXX) -L$(DIR)/lib -o p $(PROG_NAME).o $(LIBS) # Shared libraries
+all: $(TEST_EVALUATION) $(SEND_MORE_MONEY) $(SEND_MOST_MONEY)
+
+$(TEST_EVALUATION): $(TEST_EVALUATION).cpp
+	#$(CXX) -I$(DIR)/include -c $(TEST_EVALUATION).cpp # Header files
+	#$(CXX) -L$(DIR)/lib -o p $(TEST_EVALUATION).o $(LIBS) # Shared libraries
 	# mkDerivation sets NIX_CFLAGS_COMPILE (compiler flags) and NIX_LDFLAGS (headers / shared libraries)
-	$(CXX) -c $(PROG_NAME).cpp
-	$(CXX) -o $(PROG_NAME) $(PROG_NAME).o $(LIBS)
+	$(CXX) -c $(TEST_EVALUATION).cpp
+	$(CXX) -o $(TEST_EVALUATION) $(TEST_EVALUATION).o $(LIBS)
+
+$(SEND_MORE_MONEY): $(SEND_MORE_MONEY).cpp
+	$(CXX) -c $<
+	$(CXX) -o $@ $< $(LIBS)
+
+$(SEND_MOST_MONEY): $(SEND_MOST_MONEY).cpp
+	$(CXX) -c $<
+	$(CXX) -o $@ $< $(LIBS)
 
 clean:
-	rm -f $(PROG_NAME) *.o
+	rm -f $(TEST_EVALUATION) $(SEND_MORE_MONEY) $(SEND_MOST_MONEY) *.o
