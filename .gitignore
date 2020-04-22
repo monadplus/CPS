@@ -1,3 +1,2 @@
 *.o
-cplex
-!*/cplex/opl/oplide/workspace
+lp/cplex
