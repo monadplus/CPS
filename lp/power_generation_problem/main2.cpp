@@ -81,13 +81,13 @@ int main () {
   for(int i = 0; i < TYPE_2_N; i++){
     IloNumVar IS_ON = on_2[i];
     for(int j = 0; j < HOURS; j++){
-      objExp += IS_ON * 1250 + 1.3*(mw_2[i][j]-1250);
+      objExp += IS_ON * 2600 + 1.3*(mw_2[i][j]-1250);
     }
   }
   for(int i = 0; i < TYPE_3_N; i++){
     IloNumVar IS_ON = on_3[i];
     for(int j = 0; j < HOURS; j++){
-      objExp += IS_ON * 1500 + 3*(mw_3[i][j]-1500);
+      objExp += IS_ON * 3000 + 3*(mw_3[i][j]-1500);
     }
   }
   model.add(IloMinimize(env, startup_cost + objExp));

@@ -30,5 +30,10 @@ main2: main2.o
 main2.o: main2.cpp
 	$(CCC) -c $< $(CCFLAGS)
 
+main3: main3.o
+	$(CCC) -o $@ $< $(CCFLAGS) $(CCLNFLAGS)
+main3.o: main3.cpp
+	$(CCC) -c $< $(CCFLAGS)
+
 clean:
-	rm --force main main.o main2 main2.o
+	rm --force main main.o main2 main2.o main3 main3.o

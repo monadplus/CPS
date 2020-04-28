@@ -77,12 +77,12 @@ int main () {
   }
   for(int i = 0; i < TYPE_2_N; i++){
     for(int j = 0; j < HOURS; j++){
-      objExp += 1250 + 1.3*(mw_2[i][j]-1250);
+      objExp += 2600 + 1.3*(mw_2[i][j]-1250);
     }
   }
   for(int i = 0; i < TYPE_3_N; i++){
     for(int j = 0; j < HOURS; j++){
-      objExp += 1500 + 3*(mw_3[i][j]-1500);
+      objExp += 3000 + 3*(mw_3[i][j]-1500);
     }
   }
   model.add(IloMinimize(env, startup_cost + objExp));
