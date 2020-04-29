@@ -3,6 +3,7 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <ilcplex/ilocplex.h>
 
 ILOSTLBEGIN
@@ -78,11 +79,10 @@ int main(int argc, char* argv[]) {
 
       // overlapping
       for (j = i+1; j < boxes.size(); j++) {
-        model.add((x_tl[j]+width[j] <= x_tl[i]) || (x_tl[j] >= x_tl[i]+width[i]) || (y_tl[j]+height[j] <= y_tl[i]) || (y_tl[j] >= y_tl[i]+height[i]));
-        //model.add( (x_tl[i]+width[i] <= x_tl[j] || x_tl[i] >= x_tl[j]+width[j])
-                      //&&
-                        //(y_tl[i]+height[i] <= y_tl[j] || y_tl[i] >= y_tl[j]+height[j])
-                 //);
+        model.add(  (x_tl[i]+width[i]  <= x_tl[j])
+                 || (x_tl[i]           >= x_tl[j]+width[j])
+                 || (y_tl[i]+height[i] <= y_tl[j])
+                 || (y_tl[i]           >= y_tl[j]+height[j]));
       }
     }
 
@@ -90,14 +90,20 @@ int main(int argc, char* argv[]) {
     model.add(IloMinimize(env, length));
 
     IloCplex cplex(model);
+    cplex.setOut(env.getNullStream());
 
     if (cplex.solve()) {
-       cout << "Solution status: " << cplex.getStatus() << endl;
-       cout << " Minimum length: " << (cplex.getObjValue() + 1) << endl;
-
-       // TODO output
-       // TODO output
-       // TODO output
+       cout << (cplex.getObjValue() + 1) << endl;
+       for (i = 0; i < boxes.size(); ++i) {
+         IloNum x_i = cplex.getValue(x_tl[i]);
+         IloNum y_i = cplex.getValue(y_tl[i]);
+         IloNum w_i = cplex.getValue(width[i]);
+         IloNum h_i = cplex.getValue(height[i]);
+         cout << IloRound(x_i) << " " << IloRound(y_i)
+              << "   "
+              << IloRound(x_i+w_i-1) << " " << IloRound(y_i+h_i-1)
+              << endl;
+       }
     }
     else {
        cout << " No solution found" << endl;
