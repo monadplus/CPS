@@ -26,9 +26,10 @@ int main() {
 		int j; // Periods
 
     for (i = 0; i < nTypes; i++) {
-       n[i] = IloNumVarArray(env, nPeriods, 0, gen[i]);
-       s[i] = IloNumVarArray(env, nPeriods, 0, gen[i]);
-       x[i] = IloNumVarArray(env, nPeriods, 0, IloInfinity);
+       n[i] = IloNumVarArray(env, nPeriods, 0, gen[i], ILOINT);
+       s[i] = IloNumVarArray(env, nPeriods, 0, gen[i], ILOINT);
+       x[i] = IloNumVarArray(env, nPeriods, 0, IloInfinity, ILOTFLOAT); // ILOFLOAT is the default
+                                                                        // Recall float is easier to solve.
     }
 
     IloNumArray D = IloNumArray(env, nPeriods, 15000,30000,25000,40000,27000);  // Minimum output per period.
