@@ -20,13 +20,11 @@ import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Coerce
 import           Data.Foldable              (traverse_)
-import           Data.Maybe                 (mapMaybe)
+import           Data.Maybe                 (mapMaybe, catMaybes)
 import           Data.Text                  (Text)
 import qualified Data.Text                  as T
 import qualified Data.Text.IO               as T
 import           Data.Tuple                 (swap)
-import           Data.Vector.Unboxed        (Vector)
-import qualified Data.Vector.Unboxed        as Vector
 import           SAT.Mios
 import           Text.Read                  (readMaybe)
 
@@ -56,6 +54,7 @@ type Coord = (Int, Int)
 --
 -- It will additionally require:
 --  - A vector of rotations variables, one for each box.
+--       A negated rotation variable means that the box has been rotated.
 --  - A vector of coordinates vector for the overlapping.
 --
 --      +--------------+
@@ -74,22 +73,25 @@ type Coord = (Int, Int)
 --        width
 
 newtype Variable = Variable { variable :: Int }
+  deriving newtype (Show)
 
 -- | Disjunctive clause
 newtype Clause = Clause { variables :: [Variable] }
+  deriving newtype (Show)
 
 -- | Conjunction of disjunction of variables.
 type CNF = [Clause]
 
 -- | State S for the building of the BWP.
 data S = S
-  { _boxes     :: [Box]
-  , _w         :: Int        -- ^ w
-  , _maxLength :: Int        -- ^ maxLength
-  , _nVars     :: Int        -- ^ Number of variables
-  , _rotations :: Vector Int -- ^ Mapping between ith box and rotation variable
-  , _clauses   :: CNF
-  }
+    { _boxes     :: [Box]
+    , _w         :: Int             -- ^ w
+    , _maxLength :: Int             -- ^ maxLength
+    , _nVars     :: Int             -- ^ Number of variables
+    , _rotations :: [Variable]      -- ^ Mapping between ith box and rotation variable
+    , _clauses   :: CNF
+    }
+  deriving stock (Show)
 makeLenses ''S
 
 -- | The SAT Monad
@@ -104,6 +106,12 @@ emptyClause = Clause []
 
 addClause :: Clause -> SAT
 addClause c = clauses %= (c :)
+
+addClauses :: [Clause] -> SAT
+addClauses = traverse_ addClause
+
+increaseNVars :: Int -> SAT
+increaseNVars x = nVars += x
 
 class Disjunctive a b where
   (\/) :: a -> b -> Clause
@@ -126,16 +134,16 @@ newS boxes width maxLen = S
     { _boxes     = boxes
     , _w         = width
     , _maxLength = maxLen
-    , _nVars     = nvars
+    , _nVars     = nvars + length rots
     , _rotations = rots
     , _clauses   = []
     }
   where
     boxesSize = length boxes
-
     nvars = width * maxLen * boxesSize
+    rots = coerce [nvars+1 .. nvars+1+boxesSize]
 
-    rots = Vector.fromList [nvars+1 .. nvars+1+boxesSize]
+
 
 -- | Returns the variable associated with the coordinate and the ith box.
 bVar :: S -> Coord -> Int -> Variable
@@ -175,16 +183,65 @@ forEachBox f = do
                                 , y <- [0..(_maxLength - 1)]]
            | b <- [0..(length _boxes - 1)]]
 
+-- | Boxes must be placed exactly once in the paper roll.
 exactlyOne :: SAT
 exactlyOne =
-    addClauses =<< forEachBox (alo &&& amoQ)
-  where
-    addClauses = traverse_ addClause'
-    addClause' (c,cs) = traverse_ addClause (c:cs)
+  traverse_ (\(c,cs) -> addClauses (c:cs))
+      =<< forEachBox (alo &&& amoQ)
 
+-- | Boxes must be placed inside the paper roll.
+insideTheBounds :: SAT
+insideTheBounds = do
+  s@S{..} <- get
+  let boundsClauses =
+        concat [ let box = _boxes !! b
+                     var x y = bVar s (x,y) b
+                     rot = s ^?! rotations . ix b
+
+                     -- When width = height, there is no need to test rotation.
+                     fixRotation =
+                       if box^.width == box^.height then
+                         \clauses -> (neg rot \/ emptyClause) : clauses
+                       else
+                         id
+
+                     cs = catMaybes [ computeClause (x,y) box _w _maxLength rot (var x y)
+                                    | x <- [0..(_w - 1)]
+                                    , y <- [0..(_maxLength - 1)]
+                                    ]
+
+                  in fixRotation cs
+
+               | b <- [0..(length _boxes - 1)]
+               ]
+  addClauses boundsClauses
+
+  where
+    computeClause :: Coord -> Box -> Int -> Int -> Variable -> Variable -> Maybe Clause
+    computeClause (x,y) box w maxLength rot var =
+       -- No rotation
+       if box^.width == box^.height then
+         if x > w - box^.width || y > maxLength - box^.height
+             then Just $ neg var \/ emptyClause
+         else Nothing
+
+       -- May rotate
+       else
+         -- Not rotated
+         if x > w - box^.width || y > maxLength - box^.height
+           then Just $ rot \/ neg var
+         -- Rotated
+         else if x > w - box^.height || y > maxLength - box^.width
+           then Just $ neg rot \/ neg var
+         else Nothing
+
+-- TODO
 buildSAT :: SAT
 buildSAT = do
+  -- Symmetry: first box on (0,0) [the biggest one]
   exactlyOne
+  insideTheBounds
+  -- Overlapping
 
 ----------------------------------------------
 -- SAT -> BWP
@@ -217,13 +274,14 @@ type RawRotsSol = [Int]  -- ^ Length = #boxes
 type RawRotSol = Int
 
 getLen :: [BoxSol] -> Int
-getLen = undefined
+getLen =
+  (+) 1 . foldr (\BoxSol{..} -> max (snd br)) 0
 
 getSections :: S -> MiosSolution -> (RawBoxesSol, RawRotsSol)
 getSections S{..} sol = (boxSec, rotSec)
   where
     (boxSec, rem) = splitAt (length _boxes*_w*_maxLength) sol
-    rotSec = take (Vector.length _rotations) rem
+    rotSec = take (length _rotations) rem
 
 -- Get the top-left coordinates
 getCoord :: S -> RawBoxSol -> Coord
@@ -239,7 +297,7 @@ translateBox s b rawBox rawRot =
   where
     (tl_x,tl_y) = getCoord s rawBox
 
-    rot = if rawRot < 0 then id else swap
+    rot = if rawRot > 0 then id else swap
 
     (w, h) = rot (b^.width, b^.height)
 
@@ -259,8 +317,6 @@ translateSolution s@S{..} sol = BWPSolution{..}
        in (bs', rs', (translateBox s box b r):acc)
 
     len = getLen boxSolutions
-
-
 
 ----------------------------------------------
 -- Parsing & Pretty Printing

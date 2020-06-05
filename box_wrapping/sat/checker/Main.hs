@@ -9,8 +9,9 @@ Portability : POSIX
 
 This program is a sanity check to test if the outputs generated are optimum
 according to results.txt file
-
 -}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import           Control.Arrow
