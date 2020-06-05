@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
+P="cabal v1-run"
+
 for input in ../instances/*.inp; do
     output=$(basename $input .inp).out
-    if timeout 60 ./Main < $input > ../out/$output; then
+    if timeout 60 $P < $input > ../out/$output; then
       echo "ok!"
       ./checker < ../out/$output
     else
@@ -10,4 +12,3 @@ for input in ../instances/*.inp; do
       rm -f ../out/$output
     fi
 done
-
