@@ -50,11 +50,19 @@ instance Ord Box where
     let area b = b^.width * b^.height
      in area b1 `compare` area b2
 
-
+--     --- TODO
+--
+--     The upper bound on the length of the roll can also be improved. The
+--     one you have now corresponds to placing the boxes one on top of the
+--     other. But you can exploit that there may be many identical boxes. For
+--     example, you can put identical rectangles one *next* to each other
+--     until they fill the whole width, and only then begin a new line. In
+--     this way you will get an upper bound which is always as good as the
+--     one you have now, and usually strictly better.
 getMaxLength :: [Box] -> Int
-getMaxLength = maximum . fmap getLength
+getMaxLength = sum . fmap len
   where
-    getLength Box{..} = max _width _height
+    len Box{..} = max _width _height
 
 type Coord = (Int, Int)
 
@@ -113,10 +121,6 @@ type SAT = StateS ()
 neg :: Variable -> Variable
 neg = Variable . negate . variable
 
-negMaybe :: Maybe Variable -> Maybe Variable
-negMaybe Nothing = Nothing
-negMaybe (Just variable) = Just (neg variable)
-
 emptyClause :: Clause
 emptyClause = Clause []
 
@@ -161,7 +165,7 @@ newS boxes width maxLen = S
   where
     boxesSize = length boxes
     nvars = width * maxLen * boxesSize
-    rots = coerce [nvars+1 .. nvars+1+boxesSize]
+    rots = coerce [nvars+1 .. nvars+1+boxesSize - 1]
 
 
 
@@ -206,8 +210,8 @@ forEachBox f = do
 -- | Boxes must be placed exactly once in the paper roll.
 exactlyOne :: SAT
 exactlyOne =
-  traverse_ (\(c,cs) -> addClauses (c:cs))
-      =<< forEachBox (alo &&& amoQ)
+  forEachBox (alo &&& amoQ) >>=
+    traverse_ (\(c,cs) -> addClauses (c:cs))
 
 -- | Boxes must be placed inside the paper roll.
 insideTheBounds :: SAT
@@ -264,12 +268,12 @@ insideTheBounds = do
 -- (i,j) is the area where the two boxes would collide.
 --
 -- We also take into account all possible rotations of b1 and box2.
---
 noOverlapping :: SAT
 noOverlapping = do
   s@S{..} <- get
   let clauses =
-        concat [ computeClauses s b1 w1 h1 rot1 ++ computeClauses s b1 h1 w1 (negMaybe rot1)
+        concat [ computeClauses s b1 w1 h1 rot1 ++ computeClauses s b1 h1 w1 (neg <$> rot1)
+
                   | b1 <- [0..length _boxes - 1]
                   , let w1 = s ^?! boxes . ix b1 . width
                   , let h1 = s ^?! boxes . ix b1 . height
@@ -283,23 +287,26 @@ noOverlapping = do
     computeClauses :: S -> Int -> Int -> Int -> Maybe Variable -> [Clause]
     computeClauses s@S{..} b1 w1 h1 rot1 =
       concat $
-        [ computeClauses' (x,y) b2 w2 h2 rot2 ++ computeClauses' (x,y) b2 h2 w2 (negMaybe rot2)
-            | x  <- [0.._w  - w1]
-            , y  <- [0.._maxLength - h1]
-            , b2 <- [b1+1..(length _boxes - 1)]
+        [ computeClauses' (x,y) b2 w2 h2 rot2 ++ computeClauses' (x,y) b2 h2 w2 (neg <$> rot2)
+
+            | b2 <- [b1+1..(length _boxes - 1)]
             , let w2 = s ^?! boxes . ix b2 . width
             , let h2 = s ^?! boxes . ix b2 . height
             , let rot2 | w2 == h2  = Nothing
                        | otherwise = Just (s ^?! rotations . ix b2)
+
+            , x  <- [0.._w  - w1]
+            , y  <- [0.._maxLength - h1]
         ]
 
       where
 
         computeClauses' :: Coord -> Int -> Int -> Int -> Maybe Variable -> [Clause]
         computeClauses' (x,y) b2 w2 h2 rot2 =
-          [ maybeClause rot1 \/ maybeClause rot2 \/ neg boxVar1 \/ neg boxVar2
-              | i <- [max 0 (x - w2 + 1)  ..  min _w (x + w1 - 1)]
-              , j <- [max 0 (y - h2 + 1)  ..  min _w (y + h1 - 1)]
+          [ neg boxVar1 \/ neg boxVar2 \/ maybeClause rot1 \/ maybeClause rot2
+
+              | i <- [max 0 (x - w2 + 1)  ..  min _w (x + w1) - 1]
+              , j <- [max 0 (y - h2 + 1)  ..  min _maxLength (y + h1) - 1]
               , let boxVar1 = bVar s (x,y) b1
               , let boxVar2 = bVar s (i,j) b2
           ]
@@ -347,15 +354,6 @@ type RawBoxSol = [Int]   -- ^ Length = w * maxLength
 type RawRotsSol = [Int]  -- ^ Length = #boxes
 type RawRotSol = Int
 
---     --- TODO
---
---     The upper bound on the length of the roll can also be improved. The
---     one you have now corresponds to placing the boxes one on top of the
---     other. But you can exploit that there may be many identical boxes. For
---     example, you can put identical rectangles one *next* to each other
---     until they fill the whole width, and only then begin a new line. In
---     this way you will get an upper bound which is always as good as the
---     one you have now, and usually strictly better.
 getLen :: [BoxSol] -> Int
 getLen =
   (+) 1 . foldr (\BoxSol{..} -> max (snd br)) 0
@@ -375,7 +373,7 @@ getCoord S{..} raw =
 translateBox :: S -> Box -> RawBoxSol -> RawRotSol -> BoxSol
 translateBox s b rawBox rawRot =
     BoxSol{ tl = (tl_x, tl_y)
-          , br = (tl_x + w, tl_y + h)
+          , br = (tl_x + w - 1, tl_y + h - 1)
           }
   where
     (tl_x,tl_y) = getCoord s rawBox
@@ -445,7 +443,7 @@ readBoxes = go [] []
 readInt :: Text -> Maybe Int
 readInt = readMaybe . T.unpack
 
-readStatement :: IO S
+readStatement :: IO ([String], S)
 readStatement = do
   -- Read input and translate it to the BWP
   str <- T.getLine
@@ -453,10 +451,9 @@ readStatement = do
   (strs, bxs) <- readBoxes n
   let maxLen = getMaxLength bxs
 
-  -- Print the BWP statement
-  traverse_ T.putStrLn  (str:strs)
-
-  return $ newS bxs w maxLen
+  let rawStatement = T.unpack <$> (str:strs)
+      statement = newS bxs w maxLen
+  return (rawStatement, statement)
 
 printBoxWrappingSolution :: BWPSolution -> IO ()
 printBoxWrappingSolution BWPSolution{..} =
