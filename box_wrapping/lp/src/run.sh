@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 
-for input in ../instances/*.inp; do
+IN=../instances
+OUT=../out
+
+for input in $IN/*.inp; do
     output=$(basename $input .inp).out
-    if timeout 60 ./p < $input > ../out/$output; then
+    if timeout 60 ./p < $input > $OUT/$output; then
       echo "ok!"
-      ./checker < ../out/$output
+      ./checker < $OUT/$output
     else
       echo "time out!"
-      rm -f ../out/$output
+      rm -f $OUT/$output
     fi
 done
-

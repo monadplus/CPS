@@ -13,4 +13,3 @@ for input in $IN/*.inp; do
       rm -f $OUT/$output
     fi
 done
-
