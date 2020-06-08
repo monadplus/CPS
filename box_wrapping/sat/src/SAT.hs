@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns           #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE OverloadedStrings      #-}
 {-# LANGUAGE RecordWildCards        #-}
@@ -20,13 +21,15 @@ import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Coerce
 import           Data.Foldable              (traverse_)
-import           Data.Maybe                 (mapMaybe, catMaybes)
+import           Data.List                  (intersperse, sortOn)
+import           Data.Maybe                 (mapMaybe)
 import           Data.Text                  (Text)
 import qualified Data.Text                  as T
 import qualified Data.Text.IO               as T
 import           Data.Tuple                 (swap)
 import           SAT.Mios
 import           Text.Read                  (readMaybe)
+import qualified Data.Ord as Ord
 
 ----------------------------------------------
 -- Data Types
@@ -49,20 +52,6 @@ instance Ord Box where
   b1 `compare` b2 =
     let area b = b^.width * b^.height
      in area b1 `compare` area b2
-
---     --- TODO
---
---     The upper bound on the length of the roll can also be improved. The
---     one you have now corresponds to placing the boxes one on top of the
---     other. But you can exploit that there may be many identical boxes. For
---     example, you can put identical rectangles one *next* to each other
---     until they fill the whole width, and only then begin a new line. In
---     this way you will get an upper bound which is always as good as the
---     one you have now, and usually strictly better.
-getMaxLength :: [Box] -> Int
-getMaxLength = sum . fmap len
-  where
-    len Box{..} = max _width _height
 
 type Coord = (Int, Int)
 
@@ -97,7 +86,10 @@ newtype Variable = Variable { variable :: Int }
 
 -- | Disjunctive clause
 newtype Clause = Clause { variables :: [Variable] }
-  deriving newtype (Show)
+
+instance Show Clause where
+  show (Clause vars) =
+    concat $ intersperse " " $ fmap show (vars ++ [Variable 0])
 
 -- | Conjunction of disjunction of variables.
 type CNF = [Clause]
@@ -105,10 +97,8 @@ type CNF = [Clause]
 -- | State S for the building of the BWP.
 data S = S
     { _boxes     :: [Box]
-    , _w         :: Int             -- ^ w
-    , _maxLength :: Int             -- ^ maxLength
-    , _nVars     :: Int             -- ^ Number of variables
-    , _rotations :: [Variable]      -- ^ Mapping between ith box and rotation variable
+    , _w         :: Int        -- ^ w
+    , _maxLength :: Int        -- ^ maxLength
     , _clauses   :: CNF
     }
   deriving stock (Show)
@@ -134,8 +124,8 @@ addClause c = clauses %= (c :)
 addClauses :: [Clause] -> SAT
 addClauses = traverse_ addClause
 
-increaseNVars :: Int -> SAT
-increaseNVars x = nVars += x
+singleClause :: Variable -> Clause
+singleClause var = Clause [var]
 
 class Disjunctive a b where
   (\/) :: a -> b -> Clause
@@ -158,22 +148,21 @@ newS boxes width maxLen = S
     { _boxes     = boxes
     , _w         = width
     , _maxLength = maxLen
-    , _nVars     = nvars + length rots
-    , _rotations = rots
     , _clauses   = []
     }
-  where
-    boxesSize = length boxes
-    nvars = width * maxLen * boxesSize
-    rots = coerce [nvars+1 .. nvars+1+boxesSize - 1]
-
-
 
 -- | Returns the variable associated with the coordinate and the ith box.
 bVar :: S -> Coord -> Int -> Variable
 bVar S{..} (x, y) b =
   Variable (x + y*_w + b*_w*_maxLength + 1)
   --  ^^^^^^^ + 1 because variables start from 1 instead of 0
+
+bVarS :: Coord -> Int -> StateS Variable
+bVarS coord b = (\s -> bVar s coord b) <$> get
+
+getRot :: S -> Int -> Variable
+getRot S{..} b =
+  Variable ((length _boxes * _w * _maxLength) + 1 + b)
 
 -- | Conjunction of variables.
 conjunctionOf :: [Variable] -> Clause
@@ -199,66 +188,62 @@ amoL variables = undefined
 amoH :: [Variable] -> [Clause]
 amoH variables = undefined
 
--- | For each box, executes for all x,y coordinates the given function 'f'.
-forEachBox :: ([Variable] -> r) -> StateS [r]
-forEachBox f = do
-  s@S{..} <- get
-  return $ [ f [ bVar s (x,y) b | x <- [0..(_w - 1)]
-                                , y <- [0..(_maxLength - 1)]]
-           | b <- [0..(length _boxes - 1)]]
-
 -- | Boxes must be placed exactly once in the paper roll.
 exactlyOne :: SAT
 exactlyOne =
-  forEachBox (alo &&& amoQ) >>=
-    traverse_ (\(c,cs) -> addClauses (c:cs))
+    forEachBox (alo &&& amoQ) >>=
+      traverse_ (\(c,cs) -> addClauses (c:cs))
+  where
+    forEachBox :: ([Variable] -> r) -> StateS [r]
+    forEachBox f = do
+      s@S{..} <- get
+      return $ [ f [ bVar s (x,y) b | x <- [0..(_w - 1)]
+                                    , y <- [0..(_maxLength - 1)]]
+               | b <- [0..(length _boxes - 1)]]
+               -- ^^^^^ Notice we start from second box.
 
 -- | Boxes must be placed inside the paper roll.
 insideTheBounds :: SAT
 insideTheBounds = do
   s@S{..} <- get
-  let boundsClauses =
-        concat [ let box = _boxes !! b
-                     var x y = bVar s (x,y) b
-                     rot = s ^?! rotations . ix b
+  sequence_  [ addAll >> fixRotation
+             | b <- [0..(length _boxes - 1)]
+             , let box = _boxes !! b
+                   var x y = bVar s (x,y) b
+                   rot = getRot s b
 
-                     -- 1) When width = height, there is no need to test rotation.
-                     --    We can set it to rotated and just add the negation of each position (x,y)
-                     fixRotation
-                       | box^.width == box^.height =
-                          \clauses -> (neg rot \/ emptyClause) : clauses
-                       | otherwise = id
+                   -- 1) When width = height, there is no need to test rotation.
+                   --    We can set it to rotated and just add the negation of each position (x,y)
+                   fixRotation =
+                     when (box^.width == box^.height) $
+                       addClause (neg rot \/ emptyClause)
 
-                     cs = catMaybes [ computeClause (x,y) box _w _maxLength rot (var x y)
-                                    | x <- [0..        (_w - 1)]
-                                    , y <- [0..(_maxLength - 1)]
-                                    ]
-
-                  in fixRotation cs
-
-               | b <- [0..(length _boxes - 1)]
-               ]
+                   addAll = sequence  [ computeClause (x,y) box _w _maxLength rot (var x y)
+                                      | x <- [0..(_w - 1)]
+                                      , y <- [0..(_maxLength - 1)]
+                                      ]
+             ]
+         -- ^^^^ Notice we start from second box.
   -- Add all clauses to the CNF.
-  addClauses boundsClauses
 
   where
-    computeClause :: Coord -> Box -> Int -> Int -> Variable -> Variable -> Maybe Clause
+
+    computeClause :: Coord -> Box -> Int -> Int -> Variable -> Variable -> SAT
     computeClause (x,y) box w maxLength rot var
        -- See 1)
        | box^.width == box^.height =
-           if x > w - box^.width || y > maxLength - box^.height
-               then Just $ neg var \/ emptyClause
-           else Nothing
+           when (x > w - box^.width || y > maxLength - box^.height) $
+             addClause (neg var \/ emptyClause)
 
        -- May rotate: we need to add clauses for both positions.
-       | otherwise =
+       | otherwise = do
            -- 1.- Not rotated
-           if x > w - box^.width || y > maxLength - box^.height
-             then Just $ rot \/ neg var
+           when (x > w - box^.width || y > maxLength - box^.height) $
+             addClause (rot \/ neg var)
            -- 2.- Rotated
-           else if x > w - box^.height || y > maxLength - box^.width
-             then Just $ neg rot \/ neg var
-           else Nothing
+           when (x > w - box^.height || y > maxLength - box^.width) $
+             addClause (neg rot \/ neg var)
+
 
 -- | For all boxes b1, b2 (b1 < b2) computes the overlapping region form the following implication:
 --
@@ -268,6 +253,30 @@ insideTheBounds = do
 -- (i,j) is the area where the two boxes would collide.
 --
 -- We also take into account all possible rotations of b1 and box2.
+--
+--
+--  xtl_b1_xy....
+
+--  AND
+
+--  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
+--  AND
+--  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
+--  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
+--  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
+
+--  AND
+
+--  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
+--  AND
+
+--  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
+--  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
+--  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
+
+--  AND
+
+--  ....
 noOverlapping :: SAT
 noOverlapping = do
   s@S{..} <- get
@@ -278,7 +287,7 @@ noOverlapping = do
                   , let w1 = s ^?! boxes . ix b1 . width
                   , let h1 = s ^?! boxes . ix b1 . height
                   , let rot1 | w1 == h1  = Nothing
-                             | otherwise = Just (s ^?! rotations . ix b1)
+                             | otherwise = Just (getRot s b1)
                ]
   addClauses clauses
 
@@ -293,7 +302,7 @@ noOverlapping = do
             , let w2 = s ^?! boxes . ix b2 . width
             , let h2 = s ^?! boxes . ix b2 . height
             , let rot2 | w2 == h2  = Nothing
-                       | otherwise = Just (s ^?! rotations . ix b2)
+                       | otherwise = Just (getRot s b2)
 
             , x  <- [0.._w  - w1]
             , y  <- [0.._maxLength - h1]
@@ -311,15 +320,34 @@ noOverlapping = do
               , let boxVar2 = bVar s (i,j) b2
           ]
 
+-- By symmetry, place the biggest box on the coordinate (0,0).
+biggestBoxTopLeft :: SAT
+biggestBoxTopLeft = do
+    s@S{..} <- use id
 
--- TODO
--- TODO
--- TODO
--- TODO
--- TODO
+    -- Set the first box top-left coordinate to true
+    --   and the rest to false.
+    --
+    -- Boxes are sorted in decreasing order.
+    addClause =<< singleClause <$> bVarS (0,0) 0
+    addClauses $
+      fmap (singleClause . neg)
+        [ bVar s (x,y) 0 | x  <- [0.._w         - 1]
+                         , y  <- [0.._maxLength - 1]
+                         , x > 0 || y > 0]
+
+    -- Set the rest of boxes to false on the coordinates used by the first box.
+    -- To simplify, we will consider only the smallest area.
+    let k = min (s^?!boxes . ix 0 . width) (s^?!boxes . ix 0 . height)
+    addClauses $
+      fmap (singleClause . neg)
+        [ bVar s (x,y) b | b <- [1..(length _boxes - 1)]
+                         , x <- [0..k - 1]
+                         , y <- [0..k - 1]]
+
 buildSAT :: SAT
 buildSAT = do
-  -- Symmetry: first box on (0,0) [the biggest one]
+  biggestBoxTopLeft
   exactlyOne
   insideTheBounds
   noOverlapping
@@ -362,7 +390,7 @@ getSections :: S -> MiosSolution -> (RawBoxesSol, RawRotsSol)
 getSections S{..} sol = (boxSec, rotSec)
   where
     (boxSec, rem) = splitAt (length _boxes*_w*_maxLength) sol
-    rotSec = take (length _rotations) rem
+    rotSec = take (length _boxes) rem
 
 -- Get the top-left coordinates
 getCoord :: S -> RawBoxSol -> Coord
@@ -378,7 +406,7 @@ translateBox s b rawBox rawRot =
   where
     (tl_x,tl_y) = getCoord s rawBox
 
-    rot = if rawRot > 0 then id else swap
+    rot = if rawRot > 0 then swap else id
 
     (w, h) = rot (b^.width, b^.height)
 
@@ -429,32 +457,40 @@ translateSolution s@S{..} sol = BWPSolution{..}
 --   9 2   9 3
 --   5 0   5 1
 
-readBoxes :: Int -> IO ([Text], [Box])
-readBoxes = go [] []
+readBoxes :: Int -> Int -> IO ([Text], [Box], Int)
+readBoxes w = go [] [] 0
   where
-    go acc bs 0 = pure (acc, bs)
-    go acc bs n = do
+    go acc bs !maxLen 0 = pure (acc, bs, maxLen)
+    go acc bs !maxLen n = do
       line <- T.getLine
-      let [m, w, h] = mapMaybe readInt (T.splitOn " " line)
-      let b   = Box w h
+      let [m, width, height] = mapMaybe readInt (T.splitOn " " line)
+      let b   = Box width height
           bs' = replicate m b
-      go (acc ++ [line]) (bs ++ bs') (n - m)
+          l   = min (upperBoundLength m width height)
+                    (upperBoundLength m height width)
+      go (acc ++ [line]) (bs ++ bs') (maxLen + l) (n - m)
+
+    upperBoundLength :: Int -> Int -> Int -> Int
+    upperBoundLength m width height =
+      let boxesPerRow = w `div` min width height
+          minRows = ceiling (fromIntegral m / fromIntegral boxesPerRow :: Double)
+       in minRows * max width height
+
 
 readInt :: Text -> Maybe Int
 readInt = readMaybe . T.unpack
 
+-- | Read input and translate it to the BWP
 readStatement :: IO ([String], S)
 readStatement = do
-  -- Read input and translate it to the BWP
   str <- T.getLine
   let [w, n] = mapMaybe readInt (T.splitOn " " str)
-  (strs, bxs) <- readBoxes n
-  let maxLen = getMaxLength bxs
-
+  (strs, bxs, maxLen) <- readBoxes w n
   let rawStatement = T.unpack <$> (str:strs)
-      statement = newS bxs w maxLen
+      statement = newS (sortOn Ord.Down bxs) w maxLen
   return (rawStatement, statement)
 
+-- | Prints the BWP solution to the expected format
 printBoxWrappingSolution :: BWPSolution -> IO ()
 printBoxWrappingSolution BWPSolution{..} =
   print len >> traverse_ print boxSolutions
@@ -465,9 +501,12 @@ printBoxWrappingSolution BWPSolution{..} =
 
 getDescription :: S -> CNFDescription
 getDescription s = CNFDescription
-   (s ^. nVars)         -- # variables
-   (lengthOf clauses s) -- # clauses
-   mempty               -- FilePath
+   nVars                           -- # variables
+   (lengthOf (clauses.traverse) s) -- # clauses
+   mempty                          -- FilePath
+  where
+    -- Get the number of variables
+    nVars = maximum . fmap abs . concat $ (coerce (s^.clauses) :: [[Int]])
 
 runSAT :: SAT -> S -> S
 runSAT = execState

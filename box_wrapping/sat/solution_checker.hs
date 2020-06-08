@@ -1,3 +1,8 @@
+#!/usr/bin/env nix-shell
+#!nix-shell -p "haskellPackages.ghcWithHoogle (pkgs: with pkgs; [ directory protolude trifecta ])" -i runghc
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 {-|
 Module      : Main
 Description : Program Main
@@ -9,9 +14,8 @@ Portability : POSIX
 
 This program is a sanity check to test if the outputs generated are optimum
 according to results.txt file
+
 -}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import           Control.Arrow
@@ -48,21 +52,28 @@ parsePair = do
 parseResults :: Parser [(Text, Integer)]
 parseResults = many parsePair <* eof
 
-parseHeader :: Parser Char
-parseHeader = some digit *> some space *> some digit *> newline
+parseHeader :: Parser Integer
+parseHeader = some digit *> space *> integer
 
-parseLine :: Parser Char
-parseLine = some digit *> some space *> some digit *> some space *> some digit *> newline
+skipLines :: Integer -> Parser ()
+skipLines 0 = return ()
+skipLines n = do
+  n' <- some digit <* some space <* some digit <* some space <* some digit <* newline
+  let x = either (const 0) identity $ readEither @Integer n'
+  skipLines (n-x)
 
 parseOutput :: Parser Integer
-parseOutput = parseHeader *> some parseLine *> newline *> integer <* skipMany anyChar
+parseOutput = do
+  boxes <- parseHeader
+  skipLines boxes
+  integer
 
 main :: IO ()
 main = do
   content <- maybe [] identity <$> parseFromFile parseResults "results.txt"
   forM_ content $ \(f, optimum)  -> do
     whenM (doesFileExist $ toS f) $ do
-      result <- maybe 0 identity <$> parseFromFile (parseOutput <* eof) (toS f)
+      result <- maybe 0 identity <$> parseFromFile parseOutput (toS f)
       if result == optimum
         then print (f <> ": OK")
         else print (f <> ": ERROR --> OPTIMUM " <> show optimum <> " ---> MY SOLUTION " <> show result)
