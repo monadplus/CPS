@@ -21,6 +21,9 @@ class Box : public Space {
     IntVarArray x_top;
     IntVarArray y_top;
 
+    // FIXME
+    // We  can remove those variables but it is not as simple as in the LP problem.
+    // Because we need to reformulate the rotation.
     IntVarArray x_bottom;
     IntVarArray y_bottom;
 
@@ -54,8 +57,17 @@ class Box : public Space {
       else        rel(home, x, IRT_NQ, n);
     }
 
+    // Lower bound for maxLength
+    int minMaxLength() {
+      int l = 0;
+      for (int i = 0; i < boxes.size(); i++) {
+        l = max(l, std::min(boxes[i].first, boxes[i].second));
+      }
+      return l;
+    }
+
     Box(int _w, int _l, const vector<pair<int,int> >& _boxes) :
-      w(_w), boxes(_boxes), length(*this, 0, _l),
+      w(_w), boxes(_boxes), length(*this, minMaxLength(), _l),
 
       x_top(*this   , _boxes.size(), 0, _w-1),
       x_bottom(*this, _boxes.size(), 0, _w-1),
@@ -70,11 +82,9 @@ class Box : public Space {
         int width = boxes[i].first;
         int height = boxes[i].second;
         int dims[2] = {width, height};
-
         IntSet dim(dims, 2);
         IntVar v_width(*this, dim);
         IntVar v_height(*this, dim);
-
         // Required to enforce (w*h, h*w) combinations
         if(width != height) rel(*this, v_width != v_height);
 
@@ -93,6 +103,17 @@ class Box : public Space {
              || (y_top[j] > y_bottom[i])
              || (y_bottom[j] < y_top[i])
              );
+        }
+
+        // Another way to exploit that there may be many identical boxes is to
+        //   break symmetries by imposing an ordering on the coordinates they are assigned to.
+        //
+        // Notice, we can compare by pairs because we previously ordered the boxes.
+        if (i > 0) {
+          if (boxes[i-1].first == boxes[i].first && boxes[i-1].second == boxes[i].second) {
+            // Notice that a strict inequality here would be incorrect.
+            rel(*this, y_top[i-1] <= y_top[i]);
+          }
         }
 
         // Symmetry
@@ -154,13 +175,26 @@ int main(int argc, char* argv[]) {
     vector<pair<int,int>> boxes(n);
     int k = 0;
     while (k < n) {
+      // Parse the boxes
       int m, width, height;
       cin >> m >> width >> height;
       cout << m << "   " << width << " " << height << endl;
       for (int i = 0; i < m; ++i) {
         boxes[k+i] = pair<int,int>(width,height);
-        l += max(width,height);
       }
+
+      // maxLength upper bounds:
+      //
+      // Compute a better maxLength by placing boxes with the same dimensions
+      //   one next to the other until filling the width of the paper.
+      //
+      // This gives better upper bounds than placing the boxes
+      //   on above the other.
+      int boxesPerRow = w / min(width,height);
+      int minRows = std::ceil(m / ((double)boxesPerRow));
+      l += minRows * max(width,height);
+
+      // Increase the number of boxes
       k += m;
     }
 
