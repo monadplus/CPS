@@ -17,11 +17,11 @@ module SAT (
 ----------------------------------------------
 
 import           Control.Arrow              ((&&&))
-import           Control.Lens
+import           Control.Lens               hiding(inside)
 import           Control.Monad.State.Strict
 import           Data.Coerce
 import           Data.Foldable              (traverse_)
-import           Data.List                  (intersperse, sortOn)
+import           Data.List                  (sortOn)
 import           Data.Maybe                 (mapMaybe)
 import           Data.Text                  (Text)
 import qualified Data.Text                  as T
@@ -52,6 +52,9 @@ instance Ord Box where
   b1 `compare` b2 =
     let area b = b^.width * b^.height
      in area b1 `compare` area b2
+
+isSquare :: Box -> Bool
+isSquare b = b^.width == b^.height
 
 type Coord = (Int, Int)
 
@@ -89,7 +92,7 @@ newtype Clause = Clause { variables :: [Variable] }
 
 instance Show Clause where
   show (Clause vars) =
-    concat $ intersperse " " $ fmap show (vars ++ [Variable 0])
+    unwords $ fmap show (vars ++ [Variable 0])
 
 -- | Conjunction of disjunction of variables.
 type CNF = [Clause]
@@ -114,10 +117,6 @@ neg = Variable . negate . variable
 emptyClause :: Clause
 emptyClause = Clause []
 
-maybeClause :: Maybe Variable -> Clause
-maybeClause Nothing         = emptyClause
-maybeClause (Just variable) = Clause [variable]
-
 addClause :: Clause -> SAT
 addClause c = clauses %= (c :)
 
@@ -140,8 +139,11 @@ instance Disjunctive Variable Clause where
 instance Disjunctive Clause Variable where
   Clause{..} \/ var = Clause (var:variables)
 
-instance Disjunctive Clause Clause where
-  (Clause vars1) \/ (Clause vars2) = Clause (vars1 ++ vars2)
+instance Disjunctive (Maybe Variable) (Maybe Variable) where
+  Just var1 \/ Just var2 = var1 \/ var2
+  Just var \/ Nothing    = var \/ emptyClause
+  Nothing \/ Just var    = var \/ emptyClause
+  Nothing \/ Nothing     = emptyClause
 
 newS :: [Box] -> Int -> Int -> S
 newS boxes width maxLen = S
@@ -151,18 +153,35 @@ newS boxes width maxLen = S
     , _clauses   = []
     }
 
--- | Returns the variable associated with the coordinate and the ith box.
-bVar :: S -> Coord -> Int -> Variable
-bVar S{..} (x, y) b =
+getBox :: Coord -> Int -> StateS Variable
+getBox coord b = (\s -> getBoxS s coord b) <$> get
+
+getBoxS :: S -> Coord -> Int -> Variable
+getBoxS S{..} (x, y) b =
   Variable (x + y*_w + b*_w*_maxLength + 1)
-  --  ^^^^^^^ + 1 because variables start from 1 instead of 0
 
-bVarS :: Coord -> Int -> StateS Variable
-bVarS coord b = (\s -> bVar s coord b) <$> get
+getRot :: Int -> StateS Variable
+getRot b = (`getRotS` b) <$> get
 
-getRot :: S -> Int -> Variable
-getRot S{..} b =
+getRotS :: S -> Int -> Variable
+getRotS S{..} b =
   Variable ((length _boxes * _w * _maxLength) + 1 + b)
+
+getCell :: Coord -> Int -> StateS Variable
+getCell coords c = (\s -> getCellS s coords c) <$> get
+
+getCellS :: S -> Coord -> Int -> Variable
+getCellS s@S{..} coord c =
+  Variable (cellIndexStart + cellOffset)
+  where
+    nboxes = length _boxes
+    cellIndexStart      = (nboxes*_w*_maxLength) + nboxes
+    Variable cellOffset = getBoxS s coord c
+
+----------------------------------------------
+-- Encoding
+----------------------------------------------
+
 
 -- | Conjunction of variables.
 conjunctionOf :: [Variable] -> Clause
@@ -188,6 +207,36 @@ amoL variables = undefined
 amoH :: [Variable] -> [Clause]
 amoH variables = undefined
 
+----------------------------------------------
+-- Constraints
+----------------------------------------------
+
+-- By symmetry, place the biggest box on the coordinate (0,0).
+--
+-- Boxes are sorted in decreasing order so pick the first one.
+biggestBoxTopLeft :: SAT
+biggestBoxTopLeft = do
+    s@S{..} <- use id
+
+    -- Set the first box top-left coordinate to true
+    --   and the rest to false.
+    --
+    addClause =<< singleClause <$> getBox (0,0) 0
+    addClauses $
+      fmap (singleClause . neg)
+        [ getBoxS s (x,y) 0 | x  <- [0.._w         - 1]
+                         , y  <- [0.._maxLength - 1]
+                         , x > 0 || y > 0]
+
+    -- Set the rest of boxes to false on the coordinates used by the first box.
+    -- To simplify, we will consider only the smallest area.
+    let k = min (s^?!boxes . ix 0 . width) (s^?!boxes . ix 0 . height)
+    addClauses $
+      fmap (singleClause . neg)
+        [ getBoxS s (x,y) b | b <- [1..(length _boxes - 1)]
+                         , x <- [0..k - 1]
+                         , y <- [0..k - 1]]
+
 -- | Boxes must be placed exactly once in the paper roll.
 exactlyOne :: SAT
 exactlyOne =
@@ -197,153 +246,89 @@ exactlyOne =
     forEachBox :: ([Variable] -> r) -> StateS [r]
     forEachBox f = do
       s@S{..} <- get
-      return $ [ f [ bVar s (x,y) b | x <- [0..(_w - 1)]
+      return $ [ f [ getBoxS s (x,y) b | x <- [0..(_w - 1)]
                                     , y <- [0..(_maxLength - 1)]]
-               | b <- [0..(length _boxes - 1)]]
+               | b <- [1..(length _boxes - 1)]]
                -- ^^^^^ Notice we start from second box.
 
 -- | Boxes must be placed inside the paper roll.
 insideTheBounds :: SAT
 insideTheBounds = do
   s@S{..} <- get
-  sequence_  [ addAll >> fixRotation
-             | b <- [0..(length _boxes - 1)]
+  sequence_  [ sequence  [ addBoundingClause (x,y) box _w _maxLength rot (var x y)
+                           | x <- [0..(_w - 1)]
+                           , y <- [0..(_maxLength - 1)]]
+             | b <- [1..(length _boxes - 1)]
              , let box = _boxes !! b
-                   var x y = bVar s (x,y) b
-                   rot = getRot s b
-
-                   -- 1) When width = height, there is no need to test rotation.
-                   --    We can set it to rotated and just add the negation of each position (x,y)
-                   fixRotation =
-                     when (box^.width == box^.height) $
-                       addClause (neg rot \/ emptyClause)
-
-                   addAll = sequence  [ computeClause (x,y) box _w _maxLength rot (var x y)
-                                      | x <- [0..(_w - 1)]
-                                      , y <- [0..(_maxLength - 1)]
-                                      ]
+                   var x y = getBoxS s (x,y) b
+                   rot = getRotS s b
              ]
-         -- ^^^^ Notice we start from second box.
-  -- Add all clauses to the CNF.
-
   where
+    addBoundingClause :: Coord -> Box -> Int -> Int -> Variable -> Variable -> SAT
+    addBoundingClause coords box w maxLength rot var
+      | isSquare box =
+        whenM (not <$> inside coords box) $ addClause (neg var \/ emptyClause)
+      | otherwise = do
+         whenM (not <$> inside coords box)        $ addClause (rot \/ neg var)
+         whenM (not <$> insideRotated coords box) $ addClause (neg rot \/ neg var)
 
-    computeClause :: Coord -> Box -> Int -> Int -> Variable -> Variable -> SAT
-    computeClause (x,y) box w maxLength rot var
-       -- See 1)
-       | box^.width == box^.height =
-           when (x > w - box^.width || y > maxLength - box^.height) $
-             addClause (neg var \/ emptyClause)
+overlappingVariables :: SAT
+overlappingVariables = do
+  S{..} <- get
+  sequence_ [ addCellsForEachBoxAndCoordinates (x,y) (b, box)
+                 | b <- [0..(length _boxes - 1)]
+                 , let box = _boxes !! b
+                 , x <- [0.._w - 1]
+                 , y <- [0.._maxLength -1]]
+  where
+    addCellsForEachBoxAndCoordinates (x,y) (b, box)
+      | isSquare box = do
+          addCellsNoRotation (x,y) (b,box)
+          rot <- getRot b
+          addClause (neg rot \/ emptyClause)
 
-       -- May rotate: we need to add clauses for both positions.
-       | otherwise = do
-           -- 1.- Not rotated
-           when (x > w - box^.width || y > maxLength - box^.height) $
-             addClause (rot \/ neg var)
-           -- 2.- Rotated
-           when (x > w - box^.height || y > maxLength - box^.width) $
-             addClause (neg rot \/ neg var)
+      | otherwise = do
+          addCellsNoRotated (x,y) (b,box)
+          addCellsRotated (x,y) (b,box)
 
+addCellsNoRotation :: Coord -> (Int, Box) -> SAT
+addCellsNoRotation (x,y) (b, box@Box{..}) =
+  forM_ (area box (x,y)) $ \(i,j) ->
+    whenM (inside (i,j) box) $ do
+      tl  <- getBox (x,y) b
+      cl  <- getCell (i,j) b
+      addClause $ neg tl \/ cl
 
--- | For all boxes b1, b2 (b1 < b2) computes the overlapping region form the following implication:
---
---    var(b,(x,y)) ----> neg var(b2,(i,j))
---
--- (x,y) is the traversal of the whole roll paper (except for the margins)
--- (i,j) is the area where the two boxes would collide.
---
--- We also take into account all possible rotations of b1 and box2.
---
---
---  xtl_b1_xy....
+addCellsNoRotated :: Coord -> (Int, Box) -> SAT
+addCellsNoRotated (x,y) (b, box@Box{..}) =
+  forM_ (area box (x,y)) $ \(i,j) ->
+    whenM (inside (i,j) box) $ do
+      tl  <- getBox (x,y) b
+      cl  <- getCell (i,j) b
+      rot <- getRot b
+      addClause $ neg tl \/ cl \/ rot
 
---  AND
+addCellsRotated :: Coord -> (Int, Box) -> SAT
+addCellsRotated (x,y) (b, box@Box{..}) =
+  forM_ (areaRotated box (x,y)) $ \(i,j) ->
+    whenM (insideRotated (i,j) box) $ do
+      tl  <- getBox (x,y) b
+      cl  <- getCell (i,j) b
+      rot <- getRot b
+      addClause $ neg tl \/ cl \/ neg rot
 
---  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
---  AND
---  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
---  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
---  xtl_b1_xy -> c_b1_x+withd and c_b1_y+height
+amoOverlapping :: SAT
+amoOverlapping = do
+  coords <- paperRollCoords
+  nboxes <- uses boxes length
+  forM_ coords $ \(x,y) -> do
+    bxsVars <- traverse (getCell (x,y)) [0..nboxes-1]
+    addClauses $ amoQ bxsVars
 
---  AND
-
---  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
---  AND
-
---  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
---  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
---  xtl_b2_xy -> c_b2_x+withd and c_b2_y+height
-
---  AND
-
---  ....
+-- | Boxes can't overlap.
 noOverlapping :: SAT
-noOverlapping = do
-  s@S{..} <- get
-  let clauses =
-        concat [ computeClauses s b1 w1 h1 rot1 ++ computeClauses s b1 h1 w1 (neg <$> rot1)
-
-                  | b1 <- [0..length _boxes - 1]
-                  , let w1 = s ^?! boxes . ix b1 . width
-                  , let h1 = s ^?! boxes . ix b1 . height
-                  , let rot1 | w1 == h1  = Nothing
-                             | otherwise = Just (getRot s b1)
-               ]
-  addClauses clauses
-
-  where
-
-    computeClauses :: S -> Int -> Int -> Int -> Maybe Variable -> [Clause]
-    computeClauses s@S{..} b1 w1 h1 rot1 =
-      concat $
-        [ computeClauses' (x,y) b2 w2 h2 rot2 ++ computeClauses' (x,y) b2 h2 w2 (neg <$> rot2)
-
-            | b2 <- [b1+1..(length _boxes - 1)]
-            , let w2 = s ^?! boxes . ix b2 . width
-            , let h2 = s ^?! boxes . ix b2 . height
-            , let rot2 | w2 == h2  = Nothing
-                       | otherwise = Just (getRot s b2)
-
-            , x  <- [0.._w  - w1]
-            , y  <- [0.._maxLength - h1]
-        ]
-
-      where
-
-        computeClauses' :: Coord -> Int -> Int -> Int -> Maybe Variable -> [Clause]
-        computeClauses' (x,y) b2 w2 h2 rot2 =
-          [ neg boxVar1 \/ neg boxVar2 \/ maybeClause rot1 \/ maybeClause rot2
-
-              | i <- [max 0 (x - w2 + 1)  ..  min _w (x + w1) - 1]
-              , j <- [max 0 (y - h2 + 1)  ..  min _maxLength (y + h1) - 1]
-              , let boxVar1 = bVar s (x,y) b1
-              , let boxVar2 = bVar s (i,j) b2
-          ]
-
--- By symmetry, place the biggest box on the coordinate (0,0).
-biggestBoxTopLeft :: SAT
-biggestBoxTopLeft = do
-    s@S{..} <- use id
-
-    -- Set the first box top-left coordinate to true
-    --   and the rest to false.
-    --
-    -- Boxes are sorted in decreasing order.
-    addClause =<< singleClause <$> bVarS (0,0) 0
-    addClauses $
-      fmap (singleClause . neg)
-        [ bVar s (x,y) 0 | x  <- [0.._w         - 1]
-                         , y  <- [0.._maxLength - 1]
-                         , x > 0 || y > 0]
-
-    -- Set the rest of boxes to false on the coordinates used by the first box.
-    -- To simplify, we will consider only the smallest area.
-    let k = min (s^?!boxes . ix 0 . width) (s^?!boxes . ix 0 . height)
-    addClauses $
-      fmap (singleClause . neg)
-        [ bVar s (x,y) b | b <- [1..(length _boxes - 1)]
-                         , x <- [0..k - 1]
-                         , y <- [0..k - 1]]
+noOverlapping =
+  overlappingVariables >> amoOverlapping
 
 buildSAT :: SAT
 buildSAT = do
@@ -423,7 +408,7 @@ translateSolution s@S{..} sol = BWPSolution{..}
     go box (bs, rs, acc) =
       let (b, bs') = splitAt (_w * _maxLength) bs
           ([r], rs') = splitAt 1 rs
-       in (bs', rs', (translateBox s box b r):acc)
+       in (bs', rs', translateBox s box b r : acc)
 
     len = getLen boxSolutions
 
@@ -499,6 +484,24 @@ printBoxWrappingSolution BWPSolution{..} =
 -- Utils
 ----------------------------------------------
 
+-- | Like 'when', but where the test can be monadic.
+whenM :: Monad m => m Bool -> m () -> m ()
+whenM b t = ifM b t (pure ())
+
+-- | Like 'unless', but where the test can be monadic.
+unlessM :: Monad m => m Bool -> m () -> m ()
+unlessM b = ifM b (pure ())
+
+-- | Like @if@, but where the test can be monadic.
+ifM :: Monad m => m Bool -> m a -> m a -> m a
+ifM b t f = do b <- b; if b then t else f
+
+runSAT :: SAT -> S -> S
+runSAT = execState
+
+coerceCNF :: CNF -> [[Int]]
+coerceCNF = coerce
+
 getDescription :: S -> CNFDescription
 getDescription s = CNFDescription
    nVars                           -- # variables
@@ -508,8 +511,41 @@ getDescription s = CNFDescription
     -- Get the number of variables
     nVars = maximum . fmap abs . concat $ (coerce (s^.clauses) :: [[Int]])
 
-runSAT :: SAT -> S -> S
-runSAT = execState
+--forAllBoxesAllCoordinates :: StateS [(b, Box, Coord)]
+--forAllBoxesAllCoordinates = do
+  --bxs <- allBoxes
+  --liftA2 (
+  --(\(b, box) -> (b, box, paperRollCoords)) <$> bxs
 
-coerceCNF :: CNF -> [[Int]]
-coerceCNF = coerce
+paperRollCoords :: StateS [Coord]
+paperRollCoords = do
+  S{..} <- get
+  return [ (x,y) | x <- [0..       _w - 1]
+                 , y <- [0.._maxLength -1]]
+
+allBoxes :: StateS [(Int, Box)]
+allBoxes = do
+  s <- get
+  return $ zip [0..] (s^.boxes)
+
+area :: Box -> Coord -> [Coord]
+area Box{..} (x,y) =
+  [ (i,j)
+    | i <- [x..x + _width  - 1]
+    , j <- [y..y + _height - 1]]
+
+areaRotated :: Box -> Coord -> [Coord]
+areaRotated Box{..} (x,y) =
+  [ (i,j)
+    | i <- [x..x + _height - 1]
+    , j <- [y..y +  _width - 1]]
+
+inside :: Coord -> Box -> StateS Bool
+inside (x,y) Box{..} = do
+  S{..} <- use id
+  return (x + _width - 1 < _w && y + _height - 1 < _maxLength)
+
+insideRotated :: Coord -> Box -> StateS Bool
+insideRotated (x,y) Box{..} = do
+  S{..} <- use id
+  return (x + _height - 1 < _w && y + _width - 1 < _maxLength)
