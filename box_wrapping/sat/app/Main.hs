@@ -5,6 +5,7 @@ import           Data.List     (intercalate)
 import           SAT
 import           System.IO
 import           Data.Coerce
+import           Text.Printf
 
 main :: IO ()
 main = do
@@ -12,25 +13,29 @@ main = do
   -- Read input and translate it to the BWP statement
   (rawStatement, statement) <- readStatement
 
-  -- Translate the BWP problem into a CNF formula
-  let sat = runSAT buildSAT statement
-      cnf = sat ^. clauses . to coerceCNF
-      description = getDescription sat
-
-  writeSAT sat
-
   -- We print the statement before the solution
   traverse_ putStrLn rawStatement
 
-  -- Execute MIOS SAT solver with the given CNF formula
+  let sat = runSAT buildSAT statement
+      cnf = sat ^. clauses . to coerceCNF
+      description = getDescription sat
   sol <- solveSAT description cnf
-  --print sol
-
-  -- Translate SAT solution back to BWP and print the BWP solution
+  --if checkSolution
   let bws = translateSolution sat sol
+
+  writeSAT sat
+
   printBoxWrappingSolution bws
 
 --------------------
+
+--loop :: S -> Maybe (BWPSolution, S)
+--loop initial = do
+  --foldM
+
+-- TODO better checks
+checkSolution :: MiosSolution -> Bool
+checkSolution = not . null
 
 updateStatement :: Int -> S -> S
 updateStatement newMaxLen s =
