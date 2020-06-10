@@ -17,19 +17,19 @@ module SAT (
 ----------------------------------------------
 
 import           Control.Arrow              ((&&&))
-import           Control.Lens               hiding(inside)
+import           Control.Lens               hiding (inside)
 import           Control.Monad.State.Strict
 import           Data.Coerce
 import           Data.Foldable              (traverse_)
-import           Data.List                  (sortOn)
+import           Data.List                  (nub, sortOn)
 import           Data.Maybe                 (mapMaybe)
+import qualified Data.Ord                   as Ord
 import           Data.Text                  (Text)
 import qualified Data.Text                  as T
 import qualified Data.Text.IO               as T
 import           Data.Tuple                 (swap)
-import           SAT.Mios
+import           SAT.Mios                   hiding (SAT, UNSAT, validate)
 import           Text.Read                  (readMaybe)
-import qualified Data.Ord as Ord
 
 ----------------------------------------------
 -- Data Types
@@ -111,6 +111,21 @@ data S = S
   deriving stock (Show)
 makeLenses ''S
 
+-- | Lens for the computed value #boxes.
+getNBoxes :: S -> Int
+getNBoxes = length . _boxes
+
+-- | Count of all variables used in the statement.
+--
+-- tl  = B*W*L
+-- cl  = B*W*L
+-- rot = B
+--
+getNVariables :: S -> Int
+getNVariables s =
+  let nboxes = getNBoxes s
+   in (nboxes * (s^.w) * (s^.maxLength))*2 + nboxes
+
 -- | The SAT Monad
 type StateS a = State S a
 type SAT = StateS ()
@@ -179,7 +194,7 @@ getCellS :: S -> Coord -> CellIndex -> Variable
 getCellS s@S{..} coord c =
   Variable (cellIndexStart + cellOffset)
   where
-    nboxes = length _boxes
+    nboxes = getNBoxes s
     cellIndexStart      = (nboxes*_w*_maxLength) + nboxes + 1 -- TODO I added +1
     Variable cellOffset = getBoxS s coord c
 
@@ -328,6 +343,9 @@ infixr 8 !
 
 type MiosSolution = [Int]
 
+data Result a = UNSAT | SAT (S, a)
+  deriving stock (Functor)
+
 data BoxSol = BoxSol
     { tl :: Coord
     , br :: Coord
@@ -347,10 +365,6 @@ type RawBoxSol = [Int]   -- ^ Length = w * maxLength
 
 type RawRotsSol = [Int]  -- ^ Length = #boxes
 type RawRotSol = Int
-
-getLen :: [BoxSol] -> Int
-getLen =
-  (+) 1 . foldr (\BoxSol{..} -> max (snd br)) 0
 
 getSections :: S -> MiosSolution -> (RawBoxesSol, RawRotsSol)
 getSections S{..} sol = (boxSec, rotSec)
@@ -374,21 +388,44 @@ translateBox s b rawBox rawRot =
     rot = if rawRot > 0 then swap else id
     (w, h) = rot (b^.width, b^.height)
 
-translateSolution :: S -> MiosSolution -> BWPSolution
-translateSolution s@S{..} sol = BWPSolution{..}
+getBWPLength :: [BoxSol] -> Int
+getBWPLength =
+  (+) 1 . foldr (\BoxSol{..} -> max (snd br)) 0
+
+translate :: S -> MiosSolution -> BWPSolution
+translate s@S{..} sol = BWPSolution{..}
   where
     (rawBoxes, rawRots) = getSections s sol
 
     boxSolutions =
-      let (_, _, bxs) = foldr go (rawBoxes, rawRots, []) (reverse _boxes)
-        in reverse bxs
+      let (_, _, bxs) =
+            foldr go (rawBoxes, rawRots, []) (reverse _boxes)
+      in reverse bxs
 
     go box (bs, rs, acc) =
-      let (b, bs') = splitAt (_w * _maxLength) bs
+      let (b  , bs') = splitAt (_w * _maxLength) bs
           ([r], rs') = splitAt 1 rs
-       in (bs', rs', translateBox s box b r : acc)
+      in (bs', rs', translateBox s box b r : acc)
 
-    len = getLen boxSolutions
+    len = getBWPLength boxSolutions
+
+
+-- | Check the length of the output of the solver
+validate :: S -> MiosSolution -> Maybe MiosSolution
+validate statement raw =
+  if length solution < leastLength
+    then Nothing
+    else Just solution
+  where
+    solution = nub raw
+
+    leastLength =
+      let nboxes = getNBoxes statement
+       in nboxes*(statement^.w)*(statement^.maxLength) + nboxes
+
+translateSolution :: S -> MiosSolution -> Maybe BWPSolution
+translateSolution statement =
+  fmap (translate statement) . validate statement
 
 ----------------------------------------------
 -- Parsing & Pretty Printing
