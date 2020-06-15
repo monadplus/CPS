@@ -1,9 +1,0 @@
-dist/
-dist-newstyle/
-cabal.project.local
-result
-tags
-*~
-sat
-run.txt
-statement.cnf
